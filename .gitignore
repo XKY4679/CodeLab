@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+Thumbs.db
+*.tmp
+*.mp3
+*.mp4
+*.zip
+*.lrc
+*.png
+*.xlsx

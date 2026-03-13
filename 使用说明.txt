@@ -1,0 +1,101 @@
+===========================================================
+        CodeLab 工具箱启动器 —— 使用说明
+===========================================================
+
+【运行方式】
+    双击 CodeLab工具箱.py
+    或命令行：python CodeLab工具箱.py
+
+【一键安装全部依赖】
+    pip install pandas openpyxl python-docx mutagen Pillow PyPDF2 qrcode
+    （其中"批量重命名""局域网传文件""字体预览"三个工具无需安装任何库）
+
+
+===========================================================
+                   工具清单
+===========================================================
+
+  图片工具：
+    1. 批量图片压缩    → ImageCompress.py      依赖 Pillow
+    2. 图片格式转换    → FormatConverter.py     依赖 Pillow
+    3. 批量加水印      → Watermark.py           依赖 Pillow
+    4. GIF 制作工具    → GifMaker.py            依赖 Pillow
+    5. 色卡提取器      → ColorExtractor.py      依赖 Pillow
+
+  音视频工具：
+    6. 批量压缩视频    → VideoCompression_2.0.py  依赖 ffmpeg（系统安装）
+    7. Mp3 歌词嵌入    → Embed_lyrics_2.0.py      依赖 mutagen
+
+  文档工具：
+    8. PDF 合并拆分    → PDFTool.py             依赖 PyPDF2
+    9. 刷题程序 3.0    → 答题系统_3.0.py         依赖 pandas openpyxl
+
+  实用工具：
+    10. 批量重命名     → BatchRename.py          无需安装
+    11. 局域网传文件   → LANShare.py             无需安装
+    12. 字体预览工具   → FontPreview.py          无需安装
+    13. 二维码生成器   → QRCode.py               依赖 qrcode Pillow
+
+
+===========================================================
+              如何添加新工具（给自己备忘）
+===========================================================
+
+假设你新做了一个工具，比如叫"二维码生成器"：
+
+  第一步：在 CodeLab 文件夹里新建文件夹和脚本
+    CodeLab/
+      二维码生成器/
+        QRCode.py
+
+  第二步：打开 CodeLab工具箱.py，找到 TOOLS 字典
+    大概在文件开头第 20 行左右，长这样：
+
+    TOOLS = {
+        "图片工具": [
+            ("批量图片压缩", "批量图片压缩", "ImageCompress.py", "Pillow"),
+            ...
+        ],
+        "实用工具": [
+            ("批量重命名", "批量重命名", "BatchRename.py", ""),
+            ...
+        ],
+    }
+
+  第三步：在你想放的分类里，照着格式加一行：
+
+        ("二维码生成器", "二维码生成器", "QRCode.py", "qrcode"),
+
+    这一行里 4 个值的意思：
+
+        第 1 个 → 启动器里显示的工具名字
+        第 2 个 → 工具所在的文件夹名（CodeLab 下的子文件夹）
+        第 3 个 → 要运行的 .py 脚本文件名
+        第 4 个 → 需要 pip 安装的库名（不需要就填 ""）
+
+  第四步：保存，重新打开启动器，新工具就出现了。
+
+  如果想新建一个分类，照着加就行：
+    TOOLS = {
+        ...
+        "新分类名": [
+            ("工具名", "文件夹名", "脚本名.py", "依赖"),
+        ],
+    }
+
+
+===========================================================
+===========================================================
+ 找到原因了！你电脑上有两个 Python：
+
+  Python 3.10  →  C:\Program Files\Python310\          ← pip 装 Pillow 装到了这里
+  Python 3.12  →  C:\Users\XKY\AppData\Local\Programs\ ← 双击 .py 可能用的是这个
+
+  Pillow 装在了 3.10 里，但 3.12 里没装。解决办法很简单，给 3.12 也装一下：
+
+● Bash("/c/Users/XKY/AppData/Local/Programs/Python/Python312/python.exe" -m pip install pandas openpyxl python-docx
+      mutagen Pillow PyPDF2 qrcode)
+
+
+
+
