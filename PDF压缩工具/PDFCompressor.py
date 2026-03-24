@@ -1,8 +1,8 @@
 """
-PDF 压缩工具 v2 —— GUI 图形窗口版
+PDF 压缩工具 v3 —— GUI 图形窗口版
 对 PDF 内嵌图片进行智能重压缩
 支持五档质量预设 + 自定义参数
-新增：图片预览对比、提取图片、逐张详细日志
+新增：逐图管理（单独设置每张图片质量）、预览对比、提取图片
 """
 
 import tkinter as tk
@@ -50,7 +50,7 @@ def format_size(n):
 
 
 def compress_image(pil_img, quality, max_dim):
-    """压缩单张图片，返回 (new_bytes, new_pil) 或 None"""
+    """压缩单张图片，返回 (new_bytes, new_pil)"""
     # 转为 RGB
     if pil_img.mode in ("RGBA", "P", "LA"):
         bg = Image.new("RGB", pil_img.size, (255, 255, 255))
@@ -75,10 +75,531 @@ def compress_image(pil_img, quality, max_dim):
     return buf.getvalue(), pil_img
 
 
+def replace_xref_image(doc, xref, new_bytes, new_pil):
+    """替换 PDF 中指定 xref 的图片流"""
+    try:
+        doc.xref_set_key(xref, "DecodeParms", "null")
+    except Exception:
+        pass
+    try:
+        doc.xref_set_key(xref, "Predictor", "null")
+    except Exception:
+        pass
+    doc.xref_set_key(xref, "Filter", "/DCTDecode")
+    doc.xref_set_key(xref, "ColorSpace", "/DeviceRGB")
+    doc.xref_set_key(xref, "Width", str(new_pil.width))
+    doc.xref_set_key(xref, "Height", str(new_pil.height))
+    doc.xref_set_key(xref, "BitsPerComponent", "8")
+    doc.update_stream(xref, new_bytes)
+
+
+# ══════════════════════════════════════════════
+#  逐图管理弹窗
+# ══════════════════════════════════════════════
+
+class ImageManagerWindow(tk.Toplevel):
+    """弹出窗口：浏览 PDF 中所有图片，逐张设置压缩质量"""
+
+    def __init__(self, master, pdf_path, default_quality, default_max_dim,
+                 suffix, clean_meta, log_func):
+        super().__init__(master)
+        self.title(f"逐图管理 - {os.path.basename(pdf_path)}")
+        self.geometry("960x660")
+        self.resizable(True, True)
+        self.transient(master)
+        self.grab_set()
+
+        self._pdf_path = pdf_path
+        self._default_quality = default_quality
+        self._default_max_dim = default_max_dim
+        self._suffix = suffix
+        self._clean_meta = clean_meta
+        self._log_func = log_func
+        self._images = []          # list of dicts
+        self._current_idx = -1
+        self._preview_photo_orig = None
+        self._preview_photo_comp = None
+        self._updating_preview = False
+
+        self._build_ui()
+        self._load_images()
+
+    def _build_ui(self):
+        # ── 顶部信息条 ──
+        top = tk.Frame(self)
+        top.pack(fill="x", padx=10, pady=(8, 4))
+        self._info_label = tk.Label(
+            top, text="正在加载图片...",
+            font=("Microsoft YaHei", 10), fg="#666")
+        self._info_label.pack(side="left")
+        self._total_label = tk.Label(
+            top, text="", font=("Microsoft YaHei", 10, "bold"), fg="#1a73e8")
+        self._total_label.pack(side="right")
+
+        # ── 主体：左列表 + 右预览 ──
+        body = tk.Frame(self)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 4))
+
+        # 左侧：图片列表
+        left = tk.Frame(body, width=320)
+        left.pack(side="left", fill="y", padx=(0, 6))
+        left.pack_propagate(False)
+
+        tk.Label(left, text="图片列表（点击选中）",
+                 font=("Microsoft YaHei", 9, "bold")).pack(anchor="w")
+
+        list_frame = tk.Frame(left)
+        list_frame.pack(fill="both", expand=True)
+
+        self._tree = ttk.Treeview(
+            list_frame,
+            columns=("idx", "size_dim", "orig_size", "quality", "status"),
+            show="headings", height=18)
+        self._tree.heading("idx", text="#")
+        self._tree.heading("size_dim", text="尺寸")
+        self._tree.heading("orig_size", text="大小")
+        self._tree.heading("quality", text="质量")
+        self._tree.heading("status", text="状态")
+        self._tree.column("idx", width=30, anchor="center")
+        self._tree.column("size_dim", width=90, anchor="center")
+        self._tree.column("orig_size", width=65, anchor="center")
+        self._tree.column("quality", width=45, anchor="center")
+        self._tree.column("status", width=55, anchor="center")
+
+        tree_scroll = ttk.Scrollbar(list_frame, orient="vertical",
+                                     command=self._tree.yview)
+        self._tree.configure(yscrollcommand=tree_scroll.set)
+        self._tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+
+        self._tree.bind("<<TreeviewSelect>>", self._on_select)
+
+        # 左侧底部：批量操作
+        batch_frame = tk.LabelFrame(left, text=" 批量操作 ",
+                                     font=("Microsoft YaHei", 8))
+        batch_frame.pack(fill="x", pady=(4, 0))
+
+        tk.Button(batch_frame, text="全部设为此质量",
+                  font=("Microsoft YaHei", 8),
+                  command=self._apply_all).pack(side="left", padx=2, pady=2)
+        tk.Button(batch_frame, text="恢复默认",
+                  font=("Microsoft YaHei", 8),
+                  command=self._reset_all).pack(side="left", padx=2, pady=2)
+        tk.Button(batch_frame, text="大图压狠/小图保留",
+                  font=("Microsoft YaHei", 8),
+                  command=self._smart_assign).pack(side="left", padx=2, pady=2)
+
+        # 右侧：预览 + 控制
+        right = tk.Frame(body)
+        right.pack(side="right", fill="both", expand=True)
+
+        # 原图预览
+        prev_frame = tk.LabelFrame(right, text=" 原图预览 ",
+                                    font=("Microsoft YaHei", 9))
+        prev_frame.pack(fill="both", expand=True, pady=(0, 4))
+
+        self._orig_title = tk.Label(
+            prev_frame, text="选择一张图片查看",
+            font=("Microsoft YaHei", 9), fg="#888")
+        self._orig_title.pack(pady=(2, 0))
+        self._orig_label = tk.Label(prev_frame, bg="#f5f5f5")
+        self._orig_label.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # 压缩预览
+        comp_frame = tk.LabelFrame(right, text=" 压缩后预览 ",
+                                    font=("Microsoft YaHei", 9))
+        comp_frame.pack(fill="both", expand=True, pady=(0, 4))
+
+        self._comp_title = tk.Label(
+            comp_frame, text="拖动下方滑块查看压缩效果",
+            font=("Microsoft YaHei", 9), fg="#888")
+        self._comp_title.pack(pady=(2, 0))
+        self._comp_label = tk.Label(comp_frame, bg="#f5f5f5")
+        self._comp_label.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # 控制区
+        ctrl = tk.Frame(right)
+        ctrl.pack(fill="x", pady=(0, 2))
+
+        tk.Label(ctrl, text="该图质量：",
+                 font=("Microsoft YaHei", 9, "bold")).pack(side="left")
+
+        self._img_quality_var = tk.IntVar(value=self._default_quality)
+        self._img_quality_scale = tk.Scale(
+            ctrl, from_=10, to=100, orient="horizontal",
+            variable=self._img_quality_var, length=200,
+            font=("Microsoft YaHei", 8),
+            command=self._on_quality_change)
+        self._img_quality_scale.pack(side="left", padx=4)
+
+        self._img_quality_label = tk.Label(
+            ctrl, text="", font=("Microsoft YaHei", 9, "bold"), fg="#1a73e8")
+        self._img_quality_label.pack(side="left", padx=4)
+
+        tk.Button(ctrl, text="跳过此图",
+                  font=("Microsoft YaHei", 9), fg="#c62828",
+                  command=self._toggle_skip).pack(side="right", padx=4)
+
+        # ── 底部：预估 + 执行 ──
+        bottom = tk.Frame(self)
+        bottom.pack(fill="x", padx=10, pady=(0, 8))
+
+        self._estimate_label = tk.Label(
+            bottom, text="",
+            font=("Microsoft YaHei", 10), fg="#333")
+        self._estimate_label.pack(side="left")
+
+        tk.Button(bottom, text="应用并压缩",
+                  font=("Microsoft YaHei", 12, "bold"),
+                  fg="#fff", bg="#1a73e8", activeforeground="#fff",
+                  command=self._do_compress).pack(side="right", padx=(6, 0))
+
+        tk.Button(bottom, text="取消",
+                  font=("Microsoft YaHei", 10),
+                  command=self.destroy).pack(side="right")
+
+    def _load_images(self):
+        """后台线程加载 PDF 中所有图片"""
+        def task():
+            try:
+                doc = fitz.open(self._pdf_path)
+                seen = set()
+                images = []
+                for page in doc:
+                    for img_info in page.get_images(full=True):
+                        xref = img_info[0]
+                        if xref in seen:
+                            continue
+                        seen.add(xref)
+                        base_img = doc.extract_image(xref)
+                        if not base_img:
+                            continue
+                        img_bytes = base_img["image"]
+                        # 跳过太小的图（图标/装饰）
+                        if len(img_bytes) < 2000:
+                            continue
+                        try:
+                            pil = Image.open(io.BytesIO(img_bytes))
+                        except Exception:
+                            continue
+                        images.append({
+                            "xref": xref,
+                            "orig_bytes": img_bytes,
+                            "orig_pil": pil,
+                            "width": pil.width,
+                            "height": pil.height,
+                            "size": len(img_bytes),
+                            "quality": self._default_quality,
+                            "skip": False,
+                        })
+                doc.close()
+                self.after(0, self._on_loaded, images)
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("错误", str(e)))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_loaded(self, images):
+        self._images = images
+        total_size = sum(img["size"] for img in images)
+        self._info_label.configure(
+            text=f"共 {len(images)} 张图片，"
+                 f"原始总大小 {format_size(total_size)}")
+
+        for i, img in enumerate(images):
+            self._tree.insert("", "end", iid=str(i), values=(
+                i + 1,
+                f"{img['width']}x{img['height']}",
+                format_size(img["size"]),
+                img["quality"],
+                "压缩",
+            ))
+
+        self._update_estimate()
+
+        if images:
+            self._tree.selection_set("0")
+
+    def _on_select(self, event=None):
+        sel = self._tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        self._current_idx = idx
+        img = self._images[idx]
+
+        # 更新滑块
+        self._img_quality_var.set(img["quality"])
+
+        # 显示原图
+        self._show_orig(img)
+
+        # 显示压缩预览
+        self._show_compressed(img)
+
+    def _show_orig(self, img):
+        pil = img["orig_pil"]
+        # 适配预览区大小
+        max_w, max_h = 580, 140
+        r = min(max_w / pil.width, max_h / pil.height, 1.0)
+        display = pil.resize((max(int(pil.width * r), 1),
+                               max(int(pil.height * r), 1)), Image.LANCZOS)
+        if display.mode != "RGB":
+            display = display.convert("RGB")
+        self._preview_photo_orig = ImageTk.PhotoImage(display)
+        self._orig_label.configure(image=self._preview_photo_orig)
+        self._orig_title.configure(
+            text=f"原图  {img['width']}x{img['height']}  "
+                 f"{format_size(img['size'])}")
+
+    def _show_compressed(self, img):
+        quality = img["quality"]
+        if img["skip"]:
+            self._comp_title.configure(
+                text="已标记跳过（不压缩）", fg="#999")
+            self._comp_label.configure(image="")
+            self._preview_photo_comp = None
+            self._img_quality_label.configure(text="跳过", fg="#c62828")
+            return
+
+        pil = img["orig_pil"].copy()
+        new_bytes, new_pil = compress_image(pil, quality, self._default_max_dim)
+        new_size = len(new_bytes)
+
+        max_w, max_h = 580, 140
+        r = min(max_w / new_pil.width, max_h / new_pil.height, 1.0)
+        display = new_pil.resize((max(int(new_pil.width * r), 1),
+                                   max(int(new_pil.height * r), 1)),
+                                  Image.LANCZOS)
+        self._preview_photo_comp = ImageTk.PhotoImage(display)
+        self._comp_label.configure(image=self._preview_photo_comp)
+
+        saved = (1 - new_size / img["size"]) * 100 if img["size"] > 0 else 0
+        self._comp_title.configure(
+            text=f"质量 {quality}  "
+                 f"{new_pil.width}x{new_pil.height}  "
+                 f"{format_size(new_size)}  "
+                 f"节省 {saved:.0f}%",
+            fg="#2e7d32" if saved > 0 else "#c62828")
+
+        # 质量文字
+        if quality >= 85:
+            hint = f"{quality} 高清"
+        elif quality >= 60:
+            hint = f"{quality} 标准"
+        elif quality >= 40:
+            hint = f"{quality} 中等"
+        else:
+            hint = f"{quality} 压缩重"
+        self._img_quality_label.configure(text=hint, fg="#1a73e8")
+
+    def _on_quality_change(self, val=None):
+        if self._current_idx < 0 or self._current_idx >= len(self._images):
+            return
+        img = self._images[self._current_idx]
+        new_q = self._img_quality_var.get()
+        if img["quality"] == new_q:
+            return
+        img["quality"] = new_q
+        img["skip"] = False
+
+        # 更新列表显示
+        self._tree.set(str(self._current_idx), "quality", new_q)
+        self._tree.set(str(self._current_idx), "status", "压缩")
+
+        # 延迟刷新预览（防止拖滑块卡顿）
+        if self._updating_preview:
+            return
+        self._updating_preview = True
+        self.after(150, self._delayed_preview)
+
+    def _delayed_preview(self):
+        self._updating_preview = False
+        if self._current_idx < 0 or self._current_idx >= len(self._images):
+            return
+        self._show_compressed(self._images[self._current_idx])
+        self._update_estimate()
+
+    def _toggle_skip(self):
+        if self._current_idx < 0:
+            return
+        img = self._images[self._current_idx]
+        img["skip"] = not img["skip"]
+        status = "跳过" if img["skip"] else "压缩"
+        self._tree.set(str(self._current_idx), "status", status)
+        self._show_compressed(img)
+        self._update_estimate()
+
+    def _apply_all(self):
+        """把当前滑块质量应用到所有图片"""
+        q = self._img_quality_var.get()
+        for i, img in enumerate(self._images):
+            img["quality"] = q
+            img["skip"] = False
+            self._tree.set(str(i), "quality", q)
+            self._tree.set(str(i), "status", "压缩")
+        self._update_estimate()
+
+    def _reset_all(self):
+        """恢复所有图片为默认质量"""
+        for i, img in enumerate(self._images):
+            img["quality"] = self._default_quality
+            img["skip"] = False
+            self._tree.set(str(i), "quality", self._default_quality)
+            self._tree.set(str(i), "status", "压缩")
+        if self._current_idx >= 0:
+            self._img_quality_var.set(self._default_quality)
+            self._show_compressed(self._images[self._current_idx])
+        self._update_estimate()
+
+    def _smart_assign(self):
+        """智能分配：大图压狠，小图保高清"""
+        if not self._images:
+            return
+        sizes = [img["size"] for img in self._images]
+        median = sorted(sizes)[len(sizes) // 2]
+
+        for i, img in enumerate(self._images):
+            if img["size"] > median * 2:
+                # 大图：压狠一点
+                q = 45
+            elif img["size"] > median:
+                # 中图：标准压
+                q = 65
+            else:
+                # 小图：高清保留
+                q = 90
+            img["quality"] = q
+            img["skip"] = False
+            self._tree.set(str(i), "quality", q)
+            self._tree.set(str(i), "status", "压缩")
+
+        if self._current_idx >= 0:
+            self._img_quality_var.set(
+                self._images[self._current_idx]["quality"])
+            self._show_compressed(self._images[self._current_idx])
+        self._update_estimate()
+
+    def _update_estimate(self):
+        """更新底部的预估大小"""
+        if not self._images:
+            return
+        orig_total = sum(img["size"] for img in self._images)
+        est_total = 0
+        for img in self._images:
+            if img["skip"]:
+                est_total += img["size"]
+            else:
+                # 快速估算压缩后大小
+                q = img["quality"]
+                # JPEG 压缩率粗略估计
+                ratio = q / 100.0 * 0.7 + 0.05
+                est_total += int(img["size"] * ratio)
+
+        saved = orig_total - est_total
+        pct = (saved / orig_total * 100) if orig_total > 0 else 0
+        self._estimate_label.configure(
+            text=f"预估节省 ~{format_size(saved)}（~{pct:.0f}%）  "
+                 f"[仅图片部分的估算，实际以压缩结果为准]")
+        self._total_label.configure(
+            text=f"图片原始: {format_size(orig_total)}")
+
+    def _do_compress(self):
+        """按逐图设置执行压缩"""
+        if not self._images:
+            return
+
+        self._log_func("=" * 60)
+        self._log_func(f"逐图管理压缩: {os.path.basename(self._pdf_path)}")
+        self._log_func("=" * 60)
+
+        def task():
+            try:
+                before_size = os.path.getsize(self._pdf_path)
+                self.after(0, self._log_func,
+                           f"原始文件: {format_size(before_size)}")
+
+                doc = fitz.open(self._pdf_path)
+                compressed_count = 0
+
+                for i, img_info in enumerate(self._images):
+                    xref = img_info["xref"]
+                    if img_info["skip"]:
+                        self.after(0, self._log_func,
+                                   f"  [{i+1}] {img_info['width']}x"
+                                   f"{img_info['height']}  "
+                                   f"{format_size(img_info['size'])}  "
+                                   f"→ 跳过")
+                        continue
+
+                    quality = img_info["quality"]
+                    pil = img_info["orig_pil"].copy()
+                    new_bytes, new_pil = compress_image(
+                        pil, quality, self._default_max_dim)
+                    new_size = len(new_bytes)
+                    orig_size = img_info["size"]
+
+                    if new_size < orig_size:
+                        replace_xref_image(doc, xref, new_bytes, new_pil)
+                        diff = orig_size - new_size
+                        compressed_count += 1
+                        self.after(0, self._log_func,
+                                   f"  [{i+1}] Q={quality}  "
+                                   f"{img_info['width']}x{img_info['height']}"
+                                   f" → {new_pil.width}x{new_pil.height}  "
+                                   f"{format_size(orig_size)} → "
+                                   f"{format_size(new_size)}  "
+                                   f"(-{format_size(diff)})")
+                    else:
+                        self.after(0, self._log_func,
+                                   f"  [{i+1}] Q={quality}  "
+                                   f"{img_info['width']}x{img_info['height']}"
+                                   f"  {format_size(orig_size)}  "
+                                   f"已最优，跳过")
+
+                # 保存
+                base, ext = os.path.splitext(self._pdf_path)
+                out_path = f"{base}{self._suffix}{ext}"
+
+                save_opts = {"garbage": 4, "deflate": True, "clean": True}
+                if self._clean_meta:
+                    doc.set_metadata({})
+                doc.save(out_path, **save_opts)
+                doc.close()
+
+                after_size = os.path.getsize(out_path)
+                ratio = ((1 - after_size / before_size) * 100
+                         if before_size > 0 else 0)
+
+                self.after(0, self._log_func,
+                           f"\n  {format_size(before_size)} → "
+                           f"{format_size(after_size)}  "
+                           f"压缩 {ratio:.1f}%  "
+                           f"({compressed_count}/{len(self._images)} 张已压缩)")
+                self.after(0, self._log_func, f"  → {out_path}")
+                self.after(0, self._log_func, "=" * 60)
+
+                self.after(0, lambda: messagebox.showinfo(
+                    "完成",
+                    f"压缩完成！\n"
+                    f"{format_size(before_size)} → {format_size(after_size)}\n"
+                    f"节省 {ratio:.1f}%\n\n"
+                    f"保存至: {out_path}"))
+
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("压缩失败", str(e)))
+
+        threading.Thread(target=task, daemon=True).start()
+
+
+# ══════════════════════════════════════════════
+#  主窗口
+# ══════════════════════════════════════════════
+
 class PDFCompressorApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("PDF 压缩工具 v2")
+        self.title("PDF 压缩工具 v3")
         self.geometry(f"{WINDOW_W}x{WINDOW_H}")
         self.resizable(False, False)
         self._files = []
@@ -105,7 +626,7 @@ class PDFCompressorApp(tk.Tk):
         top.pack(fill="x", padx=14, pady=(10, 4))
         tk.Label(top, text="PDF 压缩工具",
                  font=("Microsoft YaHei", 16, "bold")).pack(side="left")
-        tk.Label(top, text="图片智能重压缩 · 可预览 · 可提取",
+        tk.Label(top, text="图片智能重压缩 · 逐图管理 · 可预览 · 可提取",
                  font=("Microsoft YaHei", 10), fg="#888").pack(side="left", padx=10)
 
         # ── 文件列表 ──
@@ -220,6 +741,11 @@ class PDFCompressorApp(tk.Tk):
             command=self._start_compress)
         self._start_btn.pack(side="left", padx=(0, 6))
 
+        tk.Button(act_frame, text="逐图管理",
+                  font=("Microsoft YaHei", 10, "bold"),
+                  fg="#1a73e8",
+                  command=self._open_image_manager).pack(side="left", padx=(0, 6))
+
         tk.Button(act_frame, text="预览对比",
                   font=("Microsoft YaHei", 10),
                   command=self._preview_compare).pack(side="left", padx=(0, 6))
@@ -228,7 +754,7 @@ class PDFCompressorApp(tk.Tk):
                   font=("Microsoft YaHei", 10),
                   command=self._extract_images).pack(side="left", padx=(0, 6))
 
-        self._progress = ttk.Progressbar(act_frame, length=160,
+        self._progress = ttk.Progressbar(act_frame, length=120,
                                           mode="determinate")
         self._progress.pack(side="left", padx=(6, 6))
         self._status_label = tk.Label(
@@ -338,6 +864,27 @@ class PDFCompressorApp(tk.Tk):
             return int(v) if int(v) > 0 else 0
         except (ValueError, tk.TclError):
             return 0
+
+    # ── 逐图管理 ──
+
+    def _open_image_manager(self):
+        if not self._files:
+            messagebox.showwarning("提示", "请先添加 PDF 文件")
+            return
+        # 使用列表中选中的文件，没选中就用第一个
+        sel = self._file_listbox.curselection()
+        idx = sel[0] if sel else 0
+        pdf_path = self._files[idx]
+
+        ImageManagerWindow(
+            self,
+            pdf_path=pdf_path,
+            default_quality=self._quality_var.get(),
+            default_max_dim=self._get_max_dim(),
+            suffix=self._suffix_var.get(),
+            clean_meta=self._clean_meta_var.get(),
+            log_func=self._log_msg,
+        )
 
     # ── 预览对比 ──
 
@@ -476,7 +1023,7 @@ class PDFCompressorApp(tk.Tk):
 
         threading.Thread(target=task, daemon=True).start()
 
-    # ── 压缩核心 ──
+    # ── 压缩核心（全局统一质量）──
 
     def _start_compress(self):
         if not self._files:
@@ -523,7 +1070,6 @@ class PDFCompressorApp(tk.Tk):
                 doc = fitz.open(filepath)
                 img_count = 0
                 compressed_count = 0
-                saved_bytes = 0
 
                 if not images_skip:
                     # 收集所有图片 xref（去重）
@@ -557,25 +1103,9 @@ class PDFCompressorApp(tk.Tk):
 
                             # 只有变小了才替换
                             if new_size < orig_size:
-                                # 清除旧的滤镜相关 key（避免冲突）
-                                try:
-                                    doc.xref_set_key(xref, "DecodeParms", "null")
-                                except Exception:
-                                    pass
-                                try:
-                                    doc.xref_set_key(xref, "Predictor", "null")
-                                except Exception:
-                                    pass
-
-                                doc.xref_set_key(xref, "Filter", "/DCTDecode")
-                                doc.xref_set_key(xref, "ColorSpace", "/DeviceRGB")
-                                doc.xref_set_key(xref, "Width", str(new_pil.width))
-                                doc.xref_set_key(xref, "Height", str(new_pil.height))
-                                doc.xref_set_key(xref, "BitsPerComponent", "8")
-                                doc.update_stream(xref, new_bytes)
+                                replace_xref_image(doc, xref, new_bytes, new_pil)
 
                                 diff = orig_size - new_size
-                                saved_bytes += diff
                                 compressed_count += 1
 
                                 self.after(0, self._log_msg,
@@ -608,14 +1138,14 @@ class PDFCompressorApp(tk.Tk):
                 ratio = (1 - after_size / before_size) * 100 if before_size > 0 else 0
 
                 self.after(0, self._log_msg,
-                           f"  ✓ {format_size(before_size)} → "
+                           f"  {format_size(before_size)} → "
                            f"{format_size(after_size)}  "
                            f"压缩 {ratio:.1f}%  "
                            f"({compressed_count}/{img_count} 张图片已压缩)")
                 self.after(0, self._log_msg, f"    → {out_path}")
 
             except Exception as e:
-                self.after(0, self._log_msg, f"  ✗ {name} 失败: {e}")
+                self.after(0, self._log_msg, f"  {name} 失败: {e}")
 
             self.after(0, lambda v=idx + 1: self._progress.configure(value=v))
 
