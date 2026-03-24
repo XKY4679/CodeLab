@@ -34,6 +34,7 @@ TOOLS = {
         ("批量压缩视频",   "批量压缩视频",   "VideoCompression_2.0.py", "ffmpeg（系统）"),
         ("Mp3 歌词嵌入",   "Mp3嵌入歌词",    "Embed_lyrics_2.0.py",    "mutagen"),
         ("音频波形图",     "音频波形图",     "Waveform.py",             "pydub Pillow"),
+        ("音频可视化",     "音频可视化",     "AudioVisualizer.py",      "pydub Pillow"),
     ],
     "文档工具": [
         ("PDF 合并拆分",   "PDF合并拆分",    "PDFTool.py",           "PyPDF2"),
