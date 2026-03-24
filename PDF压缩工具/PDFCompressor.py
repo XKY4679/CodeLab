@@ -75,16 +75,41 @@ def compress_image(pil_img, quality, max_dim):
     return buf.getvalue(), pil_img
 
 
+def is_safe_to_compress(doc, xref):
+    """检查该 xref 图片是否可以安全替换为 JPEG
+    返回 (safe: bool, reason: str)
+    """
+    try:
+        xref_str = doc.xref_object(xref)
+    except Exception:
+        return False, "无法读取 xref"
+
+    # 1-bit 遮罩图，不能转 JPEG
+    if "/ImageMask true" in xref_str:
+        return False, "ImageMask 遮罩"
+
+    # 有 SMask（透明蒙版）的图片，替换后蒙版会错乱
+    if "/SMask " in xref_str:
+        return False, "有 SMask 透明蒙版"
+
+    # 自身就是 SMask 的图片（被其他图引用的蒙版）
+    # 通过检查 ColorSpace 是否为 DeviceGray 且有 /Matte 来判断
+    if "/Matte " in xref_str or "/Matte[" in xref_str:
+        return False, "Matte 预乘透明"
+
+    return True, ""
+
+
 def replace_xref_image(doc, xref, new_bytes, new_pil):
     """替换 PDF 中指定 xref 的图片流"""
-    try:
-        doc.xref_set_key(xref, "DecodeParms", "null")
-    except Exception:
-        pass
-    try:
-        doc.xref_set_key(xref, "Predictor", "null")
-    except Exception:
-        pass
+    # 清除所有可能冲突的旧属性
+    for key in ("DecodeParms", "Predictor", "Decode",
+                "SMask", "Mask", "Matte", "Intent"):
+        try:
+            doc.xref_set_key(xref, key, "null")
+        except Exception:
+            pass
+
     doc.xref_set_key(xref, "Filter", "/DCTDecode")
     doc.xref_set_key(xref, "ColorSpace", "/DeviceRGB")
     doc.xref_set_key(xref, "Width", str(new_pil.width))
@@ -271,6 +296,10 @@ class ImageManagerWindow(tk.Toplevel):
                         if xref in seen:
                             continue
                         seen.add(xref)
+
+                        # 安全检查
+                        safe, reason = is_safe_to_compress(doc, xref)
+
                         base_img = doc.extract_image(xref)
                         if not base_img:
                             continue
@@ -290,7 +319,9 @@ class ImageManagerWindow(tk.Toplevel):
                             "height": pil.height,
                             "size": len(img_bytes),
                             "quality": self._default_quality,
-                            "skip": False,
+                            "skip": not safe,
+                            "unsafe": not safe,
+                            "unsafe_reason": reason,
                         })
                 doc.close()
                 self.after(0, self._on_loaded, images)
@@ -307,12 +338,16 @@ class ImageManagerWindow(tk.Toplevel):
                  f"原始总大小 {format_size(total_size)}")
 
         for i, img in enumerate(images):
+            if img["unsafe"]:
+                status = f"锁定({img['unsafe_reason']})"
+            else:
+                status = "压缩"
             self._tree.insert("", "end", iid=str(i), values=(
                 i + 1,
                 f"{img['width']}x{img['height']}",
                 format_size(img["size"]),
-                img["quality"],
-                "压缩",
+                img["quality"] if not img["unsafe"] else "-",
+                status,
             ))
 
         self._update_estimate()
@@ -354,6 +389,15 @@ class ImageManagerWindow(tk.Toplevel):
 
     def _show_compressed(self, img):
         quality = img["quality"]
+        if img.get("unsafe"):
+            self._comp_title.configure(
+                text=f"不可压缩（{img['unsafe_reason']}，替换会损坏）",
+                fg="#c62828")
+            self._comp_label.configure(image="")
+            self._preview_photo_comp = None
+            self._img_quality_label.configure(
+                text="锁定", fg="#c62828")
+            return
         if img["skip"]:
             self._comp_title.configure(
                 text="已标记跳过（不压缩）", fg="#999")
@@ -397,6 +441,8 @@ class ImageManagerWindow(tk.Toplevel):
         if self._current_idx < 0 or self._current_idx >= len(self._images):
             return
         img = self._images[self._current_idx]
+        if img.get("unsafe"):
+            return
         new_q = self._img_quality_var.get()
         if img["quality"] == new_q:
             return
@@ -424,6 +470,8 @@ class ImageManagerWindow(tk.Toplevel):
         if self._current_idx < 0:
             return
         img = self._images[self._current_idx]
+        if img.get("unsafe"):
+            return
         img["skip"] = not img["skip"]
         status = "跳过" if img["skip"] else "压缩"
         self._tree.set(str(self._current_idx), "status", status)
@@ -434,6 +482,8 @@ class ImageManagerWindow(tk.Toplevel):
         """把当前滑块质量应用到所有图片"""
         q = self._img_quality_var.get()
         for i, img in enumerate(self._images):
+            if img.get("unsafe"):
+                continue
             img["quality"] = q
             img["skip"] = False
             self._tree.set(str(i), "quality", q)
@@ -443,6 +493,8 @@ class ImageManagerWindow(tk.Toplevel):
     def _reset_all(self):
         """恢复所有图片为默认质量"""
         for i, img in enumerate(self._images):
+            if img.get("unsafe"):
+                continue
             img["quality"] = self._default_quality
             img["skip"] = False
             self._tree.set(str(i), "quality", self._default_quality)
@@ -460,6 +512,8 @@ class ImageManagerWindow(tk.Toplevel):
         median = sorted(sizes)[len(sizes) // 2]
 
         for i, img in enumerate(self._images):
+            if img.get("unsafe"):
+                continue
             if img["size"] > median * 2:
                 # 大图：压狠一点
                 q = 45
@@ -530,6 +584,16 @@ class ImageManagerWindow(tk.Toplevel):
                                    f"{img_info['height']}  "
                                    f"{format_size(img_info['size'])}  "
                                    f"→ 跳过")
+                        continue
+
+                    # 安全检查
+                    safe, reason = is_safe_to_compress(doc, xref)
+                    if not safe:
+                        self.after(0, self._log_func,
+                                   f"  [{i+1}] {img_info['width']}x"
+                                   f"{img_info['height']}  "
+                                   f"{format_size(img_info['size'])}  "
+                                   f"→ 跳过（{reason}）")
                         continue
 
                     quality = img_info["quality"]
@@ -1085,6 +1149,14 @@ class PDFCompressorApp(tk.Tk):
 
                     for xref in seen_xrefs:
                         try:
+                            # 安全检查：跳过遮罩、透明蒙版等不兼容图片
+                            safe, reason = is_safe_to_compress(doc, xref)
+                            if not safe:
+                                self.after(0, self._log_msg,
+                                           f"    [跳过] xref={xref}  "
+                                           f"{reason}")
+                                continue
+
                             base_image = doc.extract_image(xref)
                             if not base_image:
                                 continue
