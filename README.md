@@ -1,14 +1,14 @@
 <h1 align="center">🧰 CodeLab 工具箱</h1>
 
 <p align="center">
-  <strong>28 个实用 Python GUI 小工具，覆盖图片 / 音视频 / 文档 / 日常场景</strong>
+  <strong>29 个实用 Python GUI 小工具，覆盖图片 / 音视频 / 文档 / 日常场景</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white" />
   <img src="https://img.shields.io/badge/GUI-Tkinter-blue" />
   <img src="https://img.shields.io/badge/平台-Windows-0078D6?logo=windows&logoColor=white" />
-  <img src="https://img.shields.io/badge/工具数量-28-brightgreen" />
+  <img src="https://img.shields.io/badge/工具数量-29-brightgreen" />
   <img src="https://img.shields.io/github/license/XKY4679/CodeLab" />
 </p>
 
@@ -49,13 +49,14 @@ python CodeLab業的工具箱.py
 | **图片拼接工具** | 横向/纵向/网格拼接多张图片 | Pillow |
 | **App 图标生成器** | 一键生成 iOS/Android 全套尺寸图标 | Pillow |
 
-### 🎬 音视频工具（3 个）
+### 🎬 音视频工具（4 个）
 
 | 工具 | 说明 | 核心依赖 |
 |------|------|----------|
 | **批量压缩视频** | FFmpeg 批量压缩，可调码率/分辨率 | ffmpeg |
 | **Mp3 歌词嵌入** | 将 LRC 歌词嵌入 MP3 文件 | mutagen |
 | **音频波形图** | 生成音频可视化波形图片 | pydub / Pillow |
+| **音频可视化** | 5 种波形风格 + 8 种配色，批量导出精美波形图 | pydub / Pillow |
 
 ### 📄 文档工具（4 个）
 
@@ -94,7 +95,7 @@ python CodeLab業的工具箱.py
 
 - ✅ **纯 Python 实现**，跨平台友好
 - ✅ **GUI 图形界面**，无需命令行操作
-- ✅ **统一启动器**，一键管理 28 个工具
+- ✅ **统一启动器**，一键管理 29 个工具
 - ✅ **每个工具附带使用教程**
 - ✅ **按需安装依赖**，核心工具零依赖
 
@@ -127,6 +128,9 @@ CodeLab/
 │   └── 使用教程.txt
 ├── 代码截图美化/
 │   ├── CodeScreenshot.py
+│   └── 使用教程.txt
+├── 音频可视化/
+│   ├── AudioVisualizer.py
 │   └── 使用教程.txt
 ├── ...                         ← 其他工具（结构相同）
 └── .gitignore
